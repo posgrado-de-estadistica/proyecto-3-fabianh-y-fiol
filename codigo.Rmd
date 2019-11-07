@@ -1,0 +1,330 @@
+---
+title: "Universidad de Costa Rica <br> Estadística Espacial"
+subtitle: "Proyecto 2"
+author: "Fabián Hernández <br> Fiorella Laurito"
+output: 
+    html_document:
+      fig_caption: true
+      css: custom.css
+      code_folding: hide
+      theme: cerulean
+      highlight: tango
+---
+
+<script>
+   $(document).ready(function() {
+     $head = $('#header');
+     $head.prepend('<img src=\"logo.png\" style=\"float: right;width: 250px;\"/>')
+   });
+</script>
+
+# {.tabset .tabset-fade .tabset-pills}
+
+## Introducción
+
+## Resultados
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(comment=" ",cache=T)
+
+library(sf)
+library(spData)
+library(tidyverse)
+
+library(rgdal)
+library(maptools)
+library(raster)
+library(ggplot2)
+library(ggspatial)
+library(spatstat)
+
+library(gstat)
+library(lattice)
+
+# Function to get the earth distance beetween two points in the map
+earth.dist <- function (long1, lat1, long2, lat2)
+{
+rad <- pi/180
+a1 <- lat1 * rad
+a2 <- long1 * rad
+b1 <- lat2 * rad
+b2 <- long2 * rad
+dlon <- b2 - a2
+dlat <- b1 - a1
+a <- (sin(dlat/2))^2 + cos(a1) * cos(b1) * (sin(dlon/2))^2
+c <- 2 * atan2(sqrt(a), sqrt(1 - a))
+R <- 6372.79
+d <- R * c
+return(d)
+}
+
+# Function to calculate the RMSE value
+RMSE <- function(observed, predicted) {
+  sqrt(mean((predicted - observed)^2, na.rm=TRUE))
+}
+
+```
+
+Importación de capas
+
+Centro Alajuela  10.015008, -84.213265
+Centro San José  9.932662   -84.078623
+Centro Heredia   9.998375   -84.117087
+Centro Cartago   9.864178   -83.919848
+
+```{r}
+# Load Costa Rica Cantones
+Cantones.sf <- sf::st_read("Cantones_de_Costa_Rica.shp") 
+
+path <- "Cantones_de_Costa_Rica.shp"
+Cantones <- shapefile(path)
+Cantones <- spTransform(Cantones, CRS("+proj=utm +zone=16 ellps=WGS84 +units=km"))
+
+#GAM
+GAM.sf <- sf::st_read("wms.kml")
+
+GAM.sf<-sf::st_collection_extract(GAM.sf, "POLYGON")
+
+GAM<-as(GAM.sf, 'Spatial')
+GAM2 <- spTransform(GAM, CRS("+proj=utm +zone=16 ellps=WGS84 +units=km"))
+
+Cantones.GAM <- crop(Cantones, GAM2)
+
+Cantones.GAM.sf<-sf::st_as_sf(Cantones.GAM)
+
+Cantones.GAM<-as(Cantones.GAM.sf, 'Spatial') #cambiar crs en sp
+
+#Microempresas
+microempresas<-read.csv(file = "datos_microempresas.csv",sep=";",dec=",", check.names = F, encoding = "UTF-8")
+names(microempresas)<-iconv(names(microempresas), to = "ASCII", sub = "")
+dim(microempresas)
+
+microempresas<-microempresas %>% 
+  filter(Latitud >= 9.742855 & Latitud <= 10.15924 &
+                        Longitud >= -84.46879 & Longitud <= -83.76052) %>% 
+  filter(venta_diaria< 300000) %>% #quitar valores extremos
+  filter(Provincia %in% c("ALAJUELA","CARTAGO","HEREDIA","SAN JOSE")) %>% 
+  mutate(dist_centro=ifelse(Provincia=="SAN JOSE",
+                          earth.dist(long2 = -84.078623,lat2=9.932662,lat1= Latitud,long1 = Longitud),
+                   ifelse(Provincia=="ALAJUELA",
+                          earth.dist(long2 = -84.213464,lat2=10.015027,lat1= Latitud,long1 = Longitud),
+                   ifelse(Provincia=="HEREDIA",
+                          earth.dist(long2 = -84.117087,lat2=9.998375,lat1= Latitud,long1 = Longitud),
+                          earth.dist(long2 = -83.919848,lat2=9.864178,lat1= Latitud,long1 = Longitud))
+                   ))
+       )
+
+coordinates(microempresas)=~Longitud+Latitud
+
+# get values with zero calculated distance
+zero <- zerodist(microempresas, zero = 0.0)
+
+# add the right proyection
+proj4string(microempresas) <- CRS("+proj=longlat +datum=WGS84") 
+microempresas<-spTransform(microempresas, CRS("+proj=utm +zone=16 ellps=WGS84 +units=km"))
+
+
+projection(microempresas)=projection(Cantones.GAM)  
+
+# remove enterprises with zero distance
+microempresas <- microempresas[-zerodist(microempresas)[,1],] 
+
+microempresas_GAM <- over(microempresas,Cantones.GAM)
+
+microempresas$over <- microempresas_GAM$OBJECTID 
+
+microempresas.sp <- microempresas[!is.na(microempresas$over),]  
+
+dim(microempresas.sp)
+
+microempresas_data<-as.data.frame(microempresas.sp)
+
+microempresas.sf<-sf::st_as_sf(microempresas.sp)
+
+microempresas.sf<-na.omit(microempresas.sf)
+
+
+```
+
+### Regresión
+
+```{r}
+dim(microempresas_data)
+par(mfrow=c(2,2))
+
+with(microempresas_data, plot(venta_diaria~dist_centro, xlab="Distancia", ylab="Ventas diarias"))
+with(microempresas_data, abline(lm(venta_diaria~dist_centro), col="red"))
+
+with(microempresas_data, plot(venta_diaria~sqrt(dist_centro), xlab="Raíz cuadrada Distancia", ylab="Ventas diarias"))
+with(microempresas_data, abline(lm(venta_diaria~sqrt(dist_centro)), col="red"))
+
+with(microempresas_data, plot(log(venta_diaria)~dist_centro, xlab="Distancia", ylab="Logaritmo Ventas diarias"))
+with(microempresas_data, abline(lm(log(venta_diaria)~dist_centro), col="red"))
+
+with(microempresas_data, plot(log(venta_diaria)~sqrt(dist_centro), xlab="Raíz cuadrada Distancia", ylab="Logaritmo Ventas diarias"))
+with(microempresas_data, abline(lm(log(venta_diaria)~dist_centro), col="red"))
+
+par(mfrow=c(1,1))
+
+mod1<-lm(log(venta_diaria)~1, data = microempresas_data)
+summary(mod1)
+
+mod2<-lm(venta_diaria~1, data = microempresas_data)
+summary(mod2)
+
+mod3<-lm(venta_diaria~dist_centro, data = microempresas_data)
+summary(mod3)
+op <- par(mfrow=c(2, 2)); plot(mod3); par(op)
+
+anova(mod2, mod3)
+
+mod4<-lm(venta_diaria~sqrt(dist_centro), data = microempresas_data)
+summary(mod4)
+op <- par(mfrow=c(2, 2)); plot(mod4); par(op)
+
+anova(mod2, mod4)
+
+mod5<-lm(log(venta_diaria)~dist_centro, data = microempresas_data)
+summary(mod5)
+op <- par(mfrow=c(2, 2)); plot(mod5); par(op)
+
+anova(mod1, mod5)
+
+mod6<-lm(log(venta_diaria)~sqrt(dist_centro), data = microempresas_data)
+op <- par(mfrow=c(2, 2)); plot(mod5); par(op)
+summary(mod6)
+
+anova(mod1, mod6)
+
+
+
+
+coordinates(microempresas_data)=~Longitud+Latitud 
+proj4string(microempresas_data) <- CRS("+proj=utm +zone=16 ellps=WGS84 +units=km")
+#microempresas_data <- spTransform(microempresas_data, CRS("+proj=utm +zone=16 ellps=WGS84 +units=km"))
+
+
+plot(variogram(log(venta_diaria) ~ 1, microempresas_data, alpha = c(0, 45, 90, 135)))
+plot(variogram(log(venta_diaria) ~ dist_centro, microempresas_data, alpha = c(0, 45, 90, 135)))
+
+#------------
+
+l.venta.incept.vgm = variogram(log(venta_diaria)~1, microempresas_data)
+plot(l.venta.incept.vgm)
+
+
+l.venta.incept.fit = fit.variogram(l.venta.incept.vgm, model = vgm("Bes"))
+l.venta.incept.fit
+
+plot(l.venta.incept.vgm, l.venta.incept.fit)
+
+  #model     psill    range
+#1   Nug 0.2459544 0.000000
+#2   Bes 0.1226058 8.174145
+
+
+l.venta.dist.vgm = variogram(log(venta_diaria)~dist_centro, microempresas_data)
+plot(l.venta.dist.vgm)
+
+l.venta.dist.fit = fit.variogram(l.venta.dist.vgm, model = vgm("Bes"))
+l.venta.dist.fit
+
+  #  model     psill   range
+#1   Nug 0.2462060 0.00000
+#2   Bes 0.1084728 7.76918
+
+plot(l.venta.dist.vgm, l.venta.dist.fit)
+
+
+
+set.seed(1357531)
+sel100 <- sample(1:205, 154) # muestra aleatoria de 100 puntos
+m.model <- microempresas_data[sel100,] ## training set
+m.valid <- microempresas_data[-sel100,] ## testing set
+
+
+v100.fit <- fit.variogram(variogram(log(venta_diaria)~1, m.model), vgm("Bes")) # ajuste del modelo con el training set
+m.valid.pr <- krige(log(venta_diaria)~1, m.model, m.valid, v100.fit) # predicción para el testing set
+
+RMSE(observed = log(m.valid$venta_diaria),predicted = m.valid.pr$var1.pred)
+
+
+v100.fit <- fit.variogram(variogram(log(venta_diaria)~dist_centro, m.model), vgm("Bes")) # ajuste del modelo con el training set
+m.valid.pr <- krige(log(venta_diaria)~dist_centro, m.model, m.valid, v100.fit) # predicción para el testing set
+
+
+RMSE(observed = log(m.valid$venta_diaria),predicted = m.valid.pr$var1.pred) # este es mejor
+
+
+```
+
+### Interpolacion modelo nulo
+
+```{r}
+fve<- fit.variogram(l.venta.incept.vgm, model = vgm("Bes", range = 8.174145))
+
+Cantones.GAM.grid <-SpatialPixels(SpatialPoints(makegrid(Cantones.GAM, cellsize = c(1,1))), proj4string = CRS("+proj=utm +zone=16 ellps=WGS84 +units=km +ellps=WGS84"))
+gridded(Cantones.GAM.grid) = TRUE
+
+Cantones.GAM <- spTransform(Cantones.GAM, CRS("+proj=utm +zone=16 ellps=WGS84 +units=km +ellps=WGS84"))
+
+r <- raster(Cantones.GAM.grid)
+
+g <- as(r, 'SpatialGrid')
+data.grid<-as.data.frame(g)
+
+coordinates(data.grid)=~s1+s2 
+proj4string(data.grid) <- CRS("+proj=utm +zone=16 ellps=WGS84 +units=km +ellps=WGS84")
+
+#lz.ok <- krige(log(venta_diaria)~1, microempresas_data, data.grid, fve)
+
+g.cc <- gstat(NULL, "log.venta", log(venta_diaria)~1, microempresas_data, model = fve) # especificación
+
+x <- predict(g.cc, data.grid)
+
+
+#idm <- gstat(formula=OZDLYAV~1, locations=aq)
+idp <- interpolate(r, g.cc)
+## [inverse distance weighted interpolation]
+idp <- mask(idp, Cantones.GAM)
+plot(idp)
+plot(Cantones.GAM, add=TRUE)
+```
+
+### Interpolacion con covariables
+
+FALTA, no sabemos como agragar las covaraibles a data.grid
+
+### Mapeo de centros médicos
+
+```{r,fig.align='center'}
+
+ggplot() +
+  geom_sf(data = Cantones.GAM.sf,aes(fill=NOM_PROV), alpha=0.4) +
+  geom_sf(data = microempresas.sf, aes(colour=venta_diaria))+
+  ggtitle("Distribución de empresas inscritas según provincia,\n Gran Área Metropolitana, Costa Rica. ")+
+  scale_fill_brewer(palette = "Paired"
+                    , drop = FALSE,
+                    guide_legend(title="Provincia"))+
+   theme_bw()+
+  theme(legend.title = element_text(size=8),
+        legend.text = element_text(size=8),
+        plot.title = element_text(hjust = 0.5, size=10),
+        axis.title = element_text(size = 9),
+        axis.text =  element_text(size = 8))+
+  annotation_north_arrow(location = "bl", which_north = "true", 
+        pad_x = unit(0.5, "in"), pad_y = unit(0.3, "in"),
+        style = north_arrow_fancy_orienteering) +
+  annotation_scale(location = "bl", width_hint = 0.4)+
+  xlab("Longitud") + ylab("Latitud")
+
+```
+
+
+
+
+
+
+
+
+
